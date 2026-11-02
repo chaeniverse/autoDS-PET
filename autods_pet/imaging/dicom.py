@@ -16,6 +16,11 @@ import SimpleITK as sitk
 
 log = logging.getLogger(__name__)
 
+# PET-CT 수정(2026-11-02): Modality 대신 SOP Class 로 CT·PET 을 가린다
+# (Modality 가 NM 으로 적힌 장비가 있다)
+CT_SOP = {"1.2.840.10008.5.1.4.1.1.2", "1.2.840.10008.5.1.4.1.1.2.1"}
+PT_SOP = {"1.2.840.10008.5.1.4.1.1.128", "1.2.840.10008.5.1.4.1.1.130"}
+
 
 def _safe_get(
     ds: pydicom.Dataset,
@@ -193,7 +198,14 @@ def find_series_by_modality(
     for f in dcm_files:
         try:
             ds = pydicom.dcmread(str(f), stop_before_pixels=True, force=True)
-            modality = str(getattr(ds, "Modality", "")).upper()
+            sop = str(getattr(ds, "SOPClassUID", ""))
+            modality = "CT" if sop in CT_SOP else "PT" if sop in PT_SOP else ""
+            # PET-CT 수정: PET 은 감쇠보정(ATTN)되고 게이팅이 아닌 시리즈만
+            if modality == "PT" and (
+                "ATTN" not in str(getattr(ds, "CorrectedImage", ""))
+                or "gat" in str(getattr(ds, "SeriesDescription", "")).lower()
+            ):
+                modality = ""
             series_uid = str(getattr(ds, "SeriesInstanceUID", "unknown"))
             groups.setdefault((modality, series_uid), []).append(f)
         except Exception:
@@ -270,7 +282,11 @@ def extract_pet_tags(dicom_path: str | Path) -> dict[str, Any]:
     return {
         "PatientID": _safe_get(ds, "PatientID"),
         "StudyDate": _safe_get(ds, "StudyDate"),
-        "AcquisitionTime": _safe_get(ds, "AcquisitionTime"),
+        # PET-CT 수정: SUV 붕괴보정 기준은 시리즈 시작(SeriesTime).
+        # 정렬상 첫 파일의 AcquisitionTime 은 마지막 bed 시각일 수 있다
+        "AcquisitionTime": _safe_get(
+            ds, "SeriesTime", default=_safe_get(ds, "AcquisitionTime")
+        ),
         "Units": _safe_get(ds, "Units"),
         "DecayCorrection": _safe_get(ds, "DecayCorrection"),
         "RadiopharmaceuticalStartTime": rph_start,
